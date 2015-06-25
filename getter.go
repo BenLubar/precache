@@ -2,7 +2,7 @@ package precache
 
 import "golang.org/x/net/context"
 
-// Getter implementations must be immutable and comparable.
+// Getter implementations must be comparable.
 type Getter interface {
 	// Get returns an object, possibly from disk, the network, or another
 	// blocking resource. Get will be called from a new goroutine. A Getter

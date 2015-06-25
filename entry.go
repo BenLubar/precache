@@ -61,6 +61,16 @@ func (e *Entry) Close() {
 			return
 		}
 
+		if ee.c.evicter != nil {
+			// Tell the Evicter that we're not being used.
+			ee.c.evicter.Unused(ee.g)
+
+			// Stop early if the Evicter isn't ready.
+			if !ee.c.evicter.ShouldEvict(ee.g) {
+				return
+			}
+		}
+
 		// Tell the Getter to stop if it's still running.
 		ee.done()
 

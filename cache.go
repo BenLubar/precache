@@ -10,11 +10,12 @@ import (
 
 // Cache remembers the result of Getter.Get until all references are closed.
 type Cache struct {
-	m    map[Getter]*entry
-	ch   chan *entry
-	ctx  context.Context
-	done context.CancelFunc
-	lock sync.RWMutex
+	m       map[Getter]*entry
+	ch      chan *entry
+	evicter Evicter
+	ctx     context.Context
+	done    context.CancelFunc
+	lock    sync.RWMutex
 }
 
 // NewCache constructs a new Cache. The number of concurrent deferred getters
@@ -52,7 +53,9 @@ func (c *Cache) entry(g Getter, immediate bool) *entry {
 	c.lock.RLock()
 	// Easy way out: we already have the entry in cache.
 	if e, ok := c.m[g]; ok {
-		atomic.AddInt64(&e.ref, 1)
+		if atomic.AddInt64(&e.ref, 1) == 1 && c.evicter != nil {
+			c.evicter.Used(g)
+		}
 		c.lock.RUnlock()
 		return e
 	}
@@ -62,7 +65,9 @@ func (c *Cache) entry(g Getter, immediate bool) *entry {
 	defer c.lock.Unlock()
 	// Check again to make sure it wasn't added while we were unlocked.
 	if e, ok := c.m[g]; ok {
-		atomic.AddInt64(&e.ref, 1)
+		if atomic.AddInt64(&e.ref, 1) == 1 && c.evicter != nil {
+			c.evicter.Used(g)
+		}
 		return e
 	}
 
@@ -71,6 +76,18 @@ func (c *Cache) entry(g Getter, immediate bool) *entry {
 }
 
 func (c *Cache) newEntry(g Getter, immediate bool) *entry {
+	if c.evicter != nil {
+		for g, e := range c.m {
+			if atomic.LoadInt64(&e.ref) == 0 && c.evicter.ShouldEvict(g) {
+				// Tell the Getter to stop if it's still running.
+				e.done()
+
+				// Remove the entry from the map.
+				delete(c.m, g)
+			}
+		}
+	}
+
 	ctx, done := context.WithCancel(c.ctx)
 	e := &entry{c: c, g: g, ref: 1, ctx: ctx, done: done}
 	c.m[g] = e
@@ -142,6 +159,33 @@ func (c *Cache) deferred(maxConcurrent int) {
 
 		case <-c.ctx.Done():
 			return
+		}
+	}
+}
+
+// SetEvicter assigns an Evicter to the Cache. Using nil causes unused entries
+// to be evicted immediately. An Evicter should only be used with one Cache.
+func (c *Cache) SetEvicter(evicter Evicter) {
+	c.lock.Lock()
+	defer c.lock.Unlock()
+
+	c.evicter = evicter
+
+	if evicter == nil {
+		for g, e := range c.m {
+			if atomic.LoadInt64(&e.ref) == 0 {
+				// Tell the Getter to stop if it's still running.
+				e.done()
+
+				// Remove the entry from the map.
+				delete(c.m, g)
+			}
+		}
+	} else {
+		for g, e := range c.m {
+			if atomic.LoadInt64(&e.ref) == 0 {
+				c.evicter.Unused(g)
+			}
 		}
 	}
 }
